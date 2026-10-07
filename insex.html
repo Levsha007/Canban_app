@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>Совместная доска</title>
+<style>
+html,body{margin:0;height:100%;overflow:hidden;font-family:system-ui,sans-serif;background:#fafafa}
+canvas{display:block;cursor:crosshair;touch-action:none}
+#bar{position:fixed;top:12px;left:12px;background:#fff;padding:10px 12px;border-radius:10px;
+     box-shadow:0 2px 10px rgba(0,0,0,.08);display:flex;gap:10px;align-items:center;z-index:10}
+#bar input[type=range]{width:120px}
+#bar button{padding:6px 12px;border:1px solid #ddd;border-radius:6px;background:#fff;cursor:pointer}
+#bar button:hover{background:#f2f2f2}
+#status{position:fixed;top:12px;right:12px;padding:6px 12px;border-radius:10px;font-size:13px;
+        background:#fff;box-shadow:0 2px 10px rgba(0,0,0,.08);z-index:10}
+#status.on{color:#0a0}
+#status.off{color:#c00}
+</style>
+</head>
+<body>
+<div id="bar">
+  <input type="color" id="color" value="#111111">
+  <input type="range" id="width" min="1" max="40" value="4">
+  <button id="clear">Очистить</button>
+</div>
+<div id="status" class="off">Подключение…</div>
+<canvas id="c"></canvas>
+
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+const colorEl = document.getElementById('color');
+const widthEl = document.getElementById('width');
+const clearBtn = document.getElementById('clear');
+const statusEl = document.getElementById('status');
+
+let ws = null;
+let connected = false;
+let strokes = [];
+let pending = [];
+let gotSnapshot = false;
+let drawing = false;
+let last = null;
+
+function resize() {
+  canvas.width = window.innerWidth;
+  canvas.height = window.innerHeight;
+  redraw();
+}
+window.addEventListener('resize', resize);
+
+function drawStroke(s) {
+  ctx.strokeStyle = s.color;
+  ctx.lineWidth = s.width;
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+  ctx.beginPath();
+  ctx.moveTo(s.x0, s.y0);
+  ctx.lineTo(s.x1, s.y1);
+  ctx.stroke();
+}
+
+function redraw() {
+  ctx.fillStyle = '#fff';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  for (const s of strokes) drawStroke(s);
+}
+
+function connect() {
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  ws = new WebSocket(proto + '//' + location.host + '/api/ws');
+
+  ws.onopen = function() {
+    connected = true;
+    statusEl.textContent = 'Онлайн';
+    statusEl.className = 'on';
+  };
+
+  ws.onmessage = function(ev) {
+    let msg;
+    try { msg = JSON.parse(ev.data); } catch (e) { return; }
+
+    if (msg.type === 'snapshot') {
+      strokes = msg.strokes || [];
+      gotSnapshot = true;
+      for (const s of pending) strokes.push(s);
+      pending = [];
+      redraw();
+    } else if (msg.type === 'stroke') {
+      if (!gotSnapshot) {
+        pending.push(msg.stroke);
+      } else {
+        strokes.push(msg.stroke);
+        drawStroke(msg.stroke);
+      }
+    } else if (msg.type === 'clear') {
+      strokes = [];
+      redraw();
+    }
+  };
+
+  ws.onclose = function() {
+    connected = false;
+    gotSnapshot = false;
+    pending = [];
+    statusEl.textContent = 'Переподключение…';
+    statusEl.className = 'off';
+    setTimeout(connect, 800);
+  };
+
+  ws.onerror = function() { ws.close(); };
+}
+
+function send(obj) {
+  if (connected && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify(obj));
+  }
+}
+
+function startStroke(x, y) { drawing = true; last = { x: x, y: y }; }
+function endStroke() { drawing = false; last = null; }
+
+function moveStroke(x, y) {
+  if (!drawing || !last) return;
+  const s = {
+    x0: last.x, y0: last.y, x1: x, y1: y,
+    color: colorEl.value,
+    width: parseInt(widthEl.value, 10) || 4
+  };
+  strokes.push(s);
+  drawStroke(s);
+  send({ type: 'stroke', stroke: s });
+  last = { x: x, y: y };
+}
+
+canvas.addEventListener('mousedown', function(e) { startStroke(e.clientX, e.clientY); });
+canvas.addEventListener('mousemove', function(e) { moveStroke(e.clientX, e.clientY); });
+window.addEventListener('mouseup', endStroke);
+canvas.addEventListener('mouseleave', endStroke);
+
+canvas.addEventListener('touchstart', function(e) {
+  e.preventDefault();
+  const t = e.touches[0];
+  startStroke(t.clientX, t.clientY);
+}, { passive: false });
+canvas.addEventListener('touchmove', function(e) {
+  e.preventDefault();
+  const t = e.touches[0];
+  moveStroke(t.clientX, t.clientY);
+}, { passive: false });
+canvas.addEventListener('touchend', function(e) { e.preventDefault(); endStroke(); }, { passive: false });
+
+clearBtn.addEventListener('click', function() {
+  strokes = [];
+  redraw();
+  send({ type: 'clear' });
+});
+
+resize();
+connect();
+</script>
+</body>
+</html>
